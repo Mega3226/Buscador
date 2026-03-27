@@ -10,16 +10,6 @@ response.setContentType("text/html; charset=UTF-8");
 %>
 
 <%!
-// ==================== CLASE ROW ====================
-private class Row {
-    public String fecha;
-    public String asunto;
-    public String solucion;
-    public int visual;
-    public Set<String> keys = new LinkedHashSet<>();
-}
-
-// ==================== MÉTODOS AUXILIARES ====================
 private String escapeHtml(String s) {
     if (s == null) return "";
     return s.replace("&", "&amp;")
@@ -39,21 +29,24 @@ private String normalize(String s) {
             .trim();
 }
 
+// puntuación para elegir la mejor variante de codificación
 private int scoreEncoding(String s) {
     if (s == null) return Integer.MIN_VALUE;
     int score = 0;
     for (int i = 0; i < s.length(); i++) {
         char c = s.charAt(i);
-        if (c == '\uFFFD') score -= 5;
-        else if (c == 'Ã') score -= 2;
-        else if (c >= 32 && c <= 126) score++;
-        else if (c >= 160) score += 2;
+        if (c == '\uFFFD') score -= 5;          // �
+        else if (c == 'Ã') score -= 2;          // típico mojibake
+        else if (c >= 32 && c <= 126) score++;  // ASCII visible
+        else if (c >= 160) score += 2;          // letras acentuadas, ñ, etc.
     }
     return score;
 }
 
+// intento robusto de arreglar mojibake tipo "D�AS", "Ã‰", etc.
 private String fixEncoding(String s) {
     if (s == null) return null;
+
     String best = s;
     int bestScore = scoreEncoding(s);
 
@@ -90,114 +83,46 @@ private boolean matchesPhrase(String text, String phrase) {
     String t = normalize(text);
     String p = normalize(phrase);
     for (String w : p.split(" ")) {
-        if (w.isEmpty()) continue;
         if (!t.contains(w)) return false;
     }
     return true;
-}
-
-private class NormMap {
-    public String normText;
-    public int[] normToOrig;
-}
-
-private NormMap buildNormMap(String original) {
-    NormMap nm = new NormMap();
-    if (original == null) {
-        nm.normText = "";
-        nm.normToOrig = new int[0];
-        return nm;
-    }
-
-    StringBuilder normBuilder = new StringBuilder();
-    List<Integer> indexMap = new ArrayList<>();
-
-    for (int i = 0; i < original.length(); i++) {
-        char c = original.charAt(i);
-        String s = String.valueOf(c);
-        String nfd = Normalizer.normalize(s, Normalizer.Form.NFD);
-        for (int j = 0; j < nfd.length(); j++) {
-            char nc = nfd.charAt(j);
-            if (Character.getType(nc) == Character.NON_SPACING_MARK) {
-                continue;
-            }
-            normBuilder.append(Character.toLowerCase(nc));
-            indexMap.add(i);
-        }
-    }
-
-    nm.normText = normBuilder.toString();
-    nm.normToOrig = new int[indexMap.size()];
-    for (int i = 0; i < indexMap.size(); i++) {
-        nm.normToOrig[i] = indexMap.get(i);
-    }
-    return nm;
 }
 
 private String highlightTerms(String text, List<String> terms) {
     if (text == null) return "";
     if (terms == null || terms.isEmpty()) return escapeHtml(text);
 
-    NormMap nm = buildNormMap(text);
-    String normText = nm.normText;
-    int[] map = nm.normToOrig;
+    String original = text;
+    String lower = text.toLowerCase(Locale.ROOT);
 
-    class HighlightRange {
-        int start, end;
-        HighlightRange(int s, int e) { this.start = s; this.end = e; }
-    }
-    
-    List<HighlightRange> ranges = new ArrayList<>();
+    class R { int s,e; R(int s,int e){this.s=s;this.e=e;} }
+
+    List<R> ranges = new ArrayList<>();
 
     for (String term : terms) {
         if (term == null) continue;
         term = term.trim();
         if (term.isEmpty()) continue;
-
-        String normTerm = normalize(term);
-        if (normTerm.isEmpty()) continue;
-
-        boolean isSingleWord = !normTerm.contains(" ");
-
-        if (isSingleWord) {
-            String patternStr = "\\b" + java.util.regex.Pattern.quote(normTerm) + "\\b";
-            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(patternStr);
-            java.util.regex.Matcher m = pattern.matcher(normText);
-            while (m.find()) {
-                int ns = m.start();
-                int ne = m.end();
-                if (ns >= 0 && ne <= map.length) {
-                    int os = map[ns];
-                    int oe = map[ne - 1] + 1;
-                    ranges.add(new HighlightRange(os, oe));
-                }
-            }
-        } else {
-            int from = 0;
-            while (true) {
-                int idx = normText.indexOf(normTerm, from);
-                if (idx == -1) break;
-                int ns = idx;
-                int ne = idx + normTerm.length();
-                if (ns >= 0 && ne <= map.length) {
-                    int os = map[ns];
-                    int oe = map[ne - 1] + 1;
-                    ranges.add(new HighlightRange(os, oe));
-                }
-                from = idx + normTerm.length();
-            }
+        String tLower = term.toLowerCase(Locale.ROOT);
+        int from = 0;
+        while (true) {
+            int idx = lower.indexOf(tLower, from);
+            if (idx == -1) break;
+            ranges.add(new R(idx, idx + tLower.length()));
+            from = idx + tLower.length();
         }
     }
 
     if (ranges.isEmpty()) return escapeHtml(text);
 
-    ranges.sort((a, b) -> Integer.compare(a.start, b.start));
-    List<HighlightRange> merged = new ArrayList<>();
-    HighlightRange cur = ranges.get(0);
+    ranges.sort(Comparator.comparingInt(r -> r.s));
+
+    List<R> merged = new ArrayList<>();
+    R cur = ranges.get(0);
     for (int i = 1; i < ranges.size(); i++) {
-        HighlightRange r = ranges.get(i);
-        if (r.start <= cur.end) {
-            cur.end = Math.max(cur.end, r.end);
+        R r = ranges.get(i);
+        if (r.s <= cur.e) {
+            cur.e = Math.max(cur.e, r.e);
         } else {
             merged.add(cur);
             cur = r;
@@ -207,27 +132,15 @@ private String highlightTerms(String text, List<String> terms) {
 
     StringBuilder out = new StringBuilder();
     int pos = 0;
-    for (HighlightRange r : merged) {
-        if (r.start > pos) out.append(escapeHtml(text.substring(pos, r.start)));
+    for (R r : merged) {
+        if (r.s > pos) out.append(escapeHtml(original.substring(pos, r.s)));
         out.append("<span class='highlight'>");
-        out.append(escapeHtml(text.substring(r.start, r.end)));
+        out.append(escapeHtml(original.substring(r.s, r.e)));
         out.append("</span>");
-        pos = r.end;
+        pos = r.e;
     }
-    if (pos < text.length()) out.append(escapeHtml(text.substring(pos)));
-
+    if (pos < original.length()) out.append(escapeHtml(original.substring(pos)));
     return out.toString();
-}
-
-private List<Row> paginateRows(List<Row> rows, int pageNum, int pageSize) {
-    int totalRows = rows.size();
-    int startIdx = (pageNum - 1) * pageSize;
-    int endIdx = Math.min(startIdx + pageSize, totalRows);
-    
-    if (startIdx >= totalRows) startIdx = 0;
-    if (startIdx < 0) startIdx = 0;
-    
-    return rows.subList(startIdx, endIdx);
 }
 %>
 
@@ -238,15 +151,6 @@ if (orden == null || !(orden.equals("ASC") || orden.equals("DESC"))) orden = "DE
 
 String[] modulabSelected = request.getParameterValues("modulab[]");
 
-String pageNumStr = request.getParameter("pageNum");
-int pageNum = 1;
-if (pageNumStr != null) {
-    try {
-        pageNum = Integer.parseInt(pageNumStr);
-        if (pageNum < 1) pageNum = 1;
-    } catch (Exception e) { pageNum = 1; }
-}
-
 boolean hasText = (q != null && !q.trim().isEmpty());
 boolean hasApps = (modulabSelected != null && modulabSelected.length > 0);
 boolean hasSearch = hasText || hasApps;
@@ -256,6 +160,7 @@ Map<String,List<String>> appToWords = new LinkedHashMap<>();
 
 try {
     Class.forName("com.informix.jdbc.IfxDriver");
+
     Connection cnA = DriverManager.getConnection(
         "jdbc:informix-sqli://10.35.240.15:1527/clihis:INFORMIXSERVER=hbar4hu",
         "informix","w40inf"
@@ -264,12 +169,11 @@ try {
     PreparedStatement psA = cnA.prepareStatement(
         "SELECT aplicacion, rastro FROM inc_aplicaciones ORDER BY aplicacion"
     );
-
     ResultSet rsA = psA.executeQuery();
 
     while (rsA.next()) {
         String appName = fixEncoding(rsA.getString("aplicacion"));
-        String rastro = fixEncoding(rsA.getString("rastro"));
+        String rastro  = fixEncoding(rsA.getString("rastro"));
 
         Map<String,String> m = new HashMap<>();
         m.put("aplicacion", appName);
@@ -278,14 +182,12 @@ try {
 
         List<String> words = new ArrayList<>();
         if (appName != null && !appName.trim().isEmpty()) words.add(appName);
-
         if (rastro != null && !rastro.trim().isEmpty()) {
             for (String w : rastro.split(",")) {
                 w = w.trim();
                 if (!w.isEmpty()) words.add(w);
             }
         }
-
         appToWords.put(appName, words);
     }
 
@@ -296,6 +198,14 @@ try {
 } catch (Exception e) {
     out.println("<div style='color:red;font-weight:bold;'>Error cargando inc_aplicaciones: "
         + escapeHtml(e.getMessage()) + "</div>");
+}
+
+class Row {
+    String fecha;
+    String asunto;
+    String solucion;
+    int visual;
+    Set<String> keys = new LinkedHashSet<>();
 }
 
 List<Row> rows = new ArrayList<>();
@@ -330,6 +240,7 @@ if (hasApps) {
 
 try {
     Class.forName("com.informix.jdbc.IfxDriver");
+
     Connection cn = DriverManager.getConnection(
         "jdbc:informix-sqli://10.35.240.15:1527/inf:INFORMIXSERVER=hbar4hu",
         "informix","w40inf"
@@ -342,20 +253,17 @@ try {
         sql.append("SELECT asunto, solucion, fecha, visual, ");
         sql.append("TO_CHAR(fecha,'%d-%m-%Y') AS fecha_formateada ");
         sql.append("FROM ctl.solinf1 ");
-        sql.append("WHERE (");
 
-        // ============ BÚSQUEDA COMBINADA: TEXTO Y APLICACIONES ============
-        List<String> conditions = new ArrayList<>();
+        boolean whereAdded = false;
 
-        // Condición 1: Búsqueda de texto
         if (hasText) {
-            conditions.add("(LOWER(asunto) LIKE ? OR LOWER(solucion) LIKE ?)");
+            sql.append("WHERE (LOWER(asunto) LIKE ? OR LOWER(solucion) LIKE ?) ");
             String p = "%" + q.toLowerCase() + "%";
             params.add(p);
             params.add(p);
+            whereAdded = true;
         }
 
-        // Condición 2: Búsqueda de aplicaciones (nombre + rastro)
         if (hasApps) {
             List<String> allWords = new ArrayList<>();
             for (String appName : modulabSelected) {
@@ -369,30 +277,23 @@ try {
             }
 
             if (!allWords.isEmpty()) {
-                StringBuilder appCondition = new StringBuilder("(");
+                if (!whereAdded) sql.append("WHERE ");
+                else sql.append("OR ");
+                sql.append("(");
                 boolean first = true;
                 for (String w : allWords) {
-                    if (!first) appCondition.append(" OR ");
-                    appCondition.append("LOWER(asunto) LIKE ? OR LOWER(solucion) LIKE ?");
+                    if (!first) sql.append(" OR ");
+                    sql.append("LOWER(asunto) LIKE ? OR LOWER(solucion) LIKE ?");
                     String p = "%" + w + "%";
                     params.add(p);
                     params.add(p);
                     first = false;
                 }
-                appCondition.append(")");
-                conditions.add(appCondition.toString());
+                sql.append(") ");
             }
         }
 
-        // Unir todas las condiciones con OR
-        boolean first = true;
-        for (String condition : conditions) {
-            if (!first) sql.append(" OR ");
-            sql.append(condition);
-            first = false;
-        }
-
-        sql.append(") ORDER BY fecha ").append(orden);
+        sql.append("ORDER BY fecha ").append(orden);
 
     } else {
         sql.append("SELECT FIRST 5 asunto, solucion, fecha, visual, ");
@@ -413,6 +314,7 @@ try {
         r.solucion = fixEncoding(rs.getString("solucion"));
         r.visual = rs.getInt("visual");
 
+        // YA NO DESCARTAMOS FILAS AQUÍ: solo contamos coincidencias
         if (hasText) {
             boolean matchText;
             if (q.contains(" ")) {
@@ -479,17 +381,6 @@ rows.sort((a, b) -> {
 
 int ocultasCount = 0;
 for (Row r : rows) if (r.visual == 1) ocultasCount++;
-
-int pageSize = 250;
-int totalPages = (rows.size() + pageSize - 1) / pageSize;
-if (pageNum > totalPages && totalPages > 0) pageNum = totalPages;
-
-List<Row> paginatedRows = new ArrayList<>();
-if (!hasSearch) {
-    paginatedRows = rows;
-} else {
-    paginatedRows = paginateRows(rows, pageNum, pageSize);
-}
 %>
 
 <!DOCTYPE html>
@@ -500,10 +391,6 @@ if (!hasSearch) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
-* {
-    box-sizing: border-box;
-}
-
 body {
     margin: 0;
     font-family: "Segoe UI", Arial, sans-serif;
@@ -511,12 +398,7 @@ body {
     color: #0b2540;
     padding: 20px;
 }
-
-.container {
-    max-width: 1300px;
-    margin: 0 auto;
-}
-
+.container { max-width: 1300px; margin: 0 auto; }
 .header {
     display: flex;
     align-items: center;
@@ -524,19 +406,13 @@ body {
     justify-content: center;
     margin-bottom: 10px;
 }
-
-.header img {
-    height: 80px;
-    border-radius: 6px;
-}
-
+.header img { height: 80px; border-radius: 6px; }
 .header h1 {
     margin: 0;
     font-size: 28px;
     color: #0057A8;
     font-weight: 700;
 }
-
 .card {
     background: #ffffff;
     padding: 28px;
@@ -545,20 +421,17 @@ body {
     box-shadow: 0 4px 18px rgba(0,0,0,0.08);
     min-height: 480px;
 }
-
 .top-row {
     display: flex;
     justify-content: center;
     margin-bottom: 10px;
 }
-
 .input-wrap {
     width: 100%;
     max-width: 950px;
     display: flex;
     gap: 10px;
 }
-
 input[type=text] {
     flex: 1;
     padding: 12px;
@@ -566,13 +439,6 @@ input[type=text] {
     border: 1px solid #b8c4d1;
     font-size: 16px;
 }
-
-input[type=text]:focus {
-    outline: none;
-    border-color: #0057A8;
-    box-shadow: 0 0 5px rgba(0,87,168,0.3);
-}
-
 .btn-buscar {
     padding: 10px 18px;
     border: none;
@@ -581,13 +447,8 @@ input[type=text]:focus {
     color: white;
     font-weight: bold;
     cursor: pointer;
-    transition: 0.2s;
 }
-
-.btn-buscar:hover {
-    background: #004a90;
-}
-
+.btn-buscar:hover { background: #004a90; }
 .btn-modulab {
     background: #FFD84D;
     color: #000;
@@ -596,17 +457,8 @@ input[type=text]:focus {
     border: none;
     font-weight: bold;
     cursor: pointer;
-    transition: 0.2s;
 }
-
-.btn-modulab:hover {
-    background: #FFC700;
-}
-
-.modulab-dropdown {
-    position: relative;
-}
-
+.modulab-dropdown { position: relative; }
 .modulab-options {
     display: none;
     position: absolute;
@@ -621,7 +473,6 @@ input[type=text]:focus {
     max-height: 350px;
     overflow-y: auto;
 }
-
 .modulab-options label {
     display: flex;
     align-items: center;
@@ -630,44 +481,23 @@ input[type=text]:focus {
     font-size: 13px;
     cursor: pointer;
 }
-
-.modulab-options label:hover {
-    background: #f0f0f0;
-    border-radius: 4px;
-    padding: 4px 8px;
-}
-
-.modulab-options input[type="checkbox"] {
-    cursor: pointer;
-}
-
 .small-note {
     margin-top: 8px;
     color: #555;
     font-size: 13px;
 }
-
-.found-words {
-    margin-top: 20px;
-}
-
-.found-row {
-    margin-bottom: 12px;
-}
-
+.found-words { margin-top: 20px; }
+.found-row { margin-bottom: 12px; }
 .found-row strong {
     display: block;
     margin-bottom: 6px;
     font-size: 15px;
-    color: #0057A8;
 }
-
 .word-box-container {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
 }
-
 .word-box {
     display: flex;
     align-items: center;
@@ -679,33 +509,28 @@ input[type=text]:focus {
     cursor: pointer;
     font-size: 13px;
     transition: 0.2s;
-    user-select: none;
 }
-
-.word-box:hover {
-    border-color: #0057A8;
-    box-shadow: 0 2px 8px rgba(0,87,168,0.1);
-}
-
 .word-box.active-filter {
     border-color: #0057A8;
     background: #e3f2fd;
-    font-weight: bold;
 }
-
+.word-box.disabled {
+    background: #ffe5e5;
+    border-color: #ffb3b3;
+    color: #555;
+    opacity: 0.6;
+    cursor: not-allowed;
+}
 .word-circle {
     width: 14px;
     height: 14px;
     border-radius: 50%;
     background: #4CAF50;
     flex-shrink: 0;
-    transition: 0.2s;
 }
-
 .word-circle.off {
     background: #e53935;
 }
-
 #resetFiltersBtn {
     margin-top: 6px;
     padding: 6px 12px;
@@ -714,21 +539,15 @@ input[type=text]:focus {
     background: #ffffff;
     cursor: pointer;
     font-size: 13px;
-    transition: 0.2s;
 }
-
 #resetFiltersBtn:hover {
     background: #e3f2fd;
-    border-color: #0057A8;
 }
-
 .filter-visual {
     margin-top: 15px;
     display: flex;
     gap: 10px;
-    flex-wrap: wrap;
 }
-
 .vis-btn {
     padding: 8px 12px;
     border-radius: 6px;
@@ -736,35 +555,12 @@ input[type=text]:focus {
     font-weight: bold;
     cursor: pointer;
     font-size: 13px;
-    transition: 0.2s;
 }
-
-.vis-btn.green {
-    background: #c8e6c9;
-}
-
-.vis-btn.red {
-    background: #ffcdd2;
-}
-
-.vis-btn.fav {
-    background: #ffe082;
-}
-
-.vis-btn.active {
-    outline: 2px solid #000;
-}
-
-.vis-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-}
-
-.table-wrap {
-    margin-top: 15px;
-    overflow-x: auto;
-}
-
+.vis-btn.green { background: #c8e6c9; }
+.vis-btn.red { background: #ffcdd2; }
+.vis-btn.fav { background: #ffe082; }
+.vis-btn.active { outline: 2px solid #000; }
+.table-wrap { margin-top: 15px; overflow-x: auto; }
 table {
     width: 100%;
     border-collapse: collapse;
@@ -772,7 +568,6 @@ table {
     border: 1px solid #d6dce5;
     table-layout: fixed;
 }
-
 thead th {
     background: #0057A8;
     color: white;
@@ -780,16 +575,6 @@ thead th {
     text-align: center;
     font-weight: 600;
 }
-
-thead th select {
-    padding: 4px;
-    border-radius: 4px;
-    border: 1px solid #999;
-    background: white;
-    color: #000;
-    cursor: pointer;
-}
-
 td {
     padding: 8px 10px;
     border-bottom: 1px solid #e5e9ef;
@@ -797,156 +582,44 @@ td {
     word-wrap: break-word;
     overflow-wrap: break-word;
 }
-
-th.col-fecha, td.col-fecha {
-    width: 110px;
-}
-
-th.col-visual, td.col-visual {
-    width: 90px;
-}
-
-.highlight {
-    background: yellow;
-    font-weight: bold;
-}
-
-.col-fecha {
-    text-align: center;
-    white-space: nowrap;
-}
-
-.col-visual {
-    text-align: center;
-}
-
+th.col-fecha, td.col-fecha { width: 110px; }
+th.col-visual, td.col-visual { width: 90px; }
+.highlight { background: yellow; }
+.col-fecha { text-align: center; white-space: nowrap; }
+.col-visual { text-align: center; }
 .circle {
     width: 18px;
     height: 18px;
     border-radius: 50%;
     cursor: pointer;
-    margin: 0 auto 4px;
-    transition: 0.2s;
+    margin: auto;
 }
-
-.circle:hover {
-    transform: scale(1.2);
-}
-
-.circle.green {
-    background: #4CAF50;
-}
-
-.circle.red {
-    background: #e53935;
-}
-
+.circle.green { background: #4CAF50; }
+.circle.red { background: #e53935; }
 .star {
     cursor: pointer;
     font-size: 18px;
     margin-top: 4px;
     color: #bbb;
-    transition: 0.2s;
 }
-
-.star:hover {
-    transform: scale(1.2);
-    color: #ffca28;
-}
-
-.fav-star {
-    color: #ffca28;
-}
-
+.fav-star { color: #ffca28; }
 tr.favorito {
     background: #fff8d6 !important;
 }
-
 tr.favorito .highlight {
     background: #ff9800 !important;
-}
-
-tbody tr:hover {
-    background: #f5f7fa;
-}
-
-.pagination {
-    margin-top: 30px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.pagination button {
-    padding: 10px 16px;
-    border-radius: 6px;
-    border: 1px solid #b8c4d1;
-    background: #ffffff;
-    cursor: pointer;
-    font-weight: bold;
-    transition: 0.2s;
-    min-width: 120px;
-}
-
-.pagination button:hover:not(:disabled) {
-    background: #e3f2fd;
-    border-color: #0057A8;
-    transform: translateY(-2px);
-}
-
-.pagination button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    color: #999;
-}
-
-.pagination-info {
-    min-width: 180px;
-    text-align: center;
-    font-weight: bold;
-    font-size: 14px;
-}
-
-@media (max-width: 768px) {
-    .header {
-        flex-direction: column;
-        gap: 10px;
-    }
-
-    .input-wrap {
-        flex-direction: column;
-    }
-
-    .word-box-container {
-        flex-direction: column;
-    }
-
-    .pagination {
-        gap: 5px;
-    }
-
-    .pagination button {
-        padding: 8px 12px;
-        font-size: 12px;
-        min-width: auto;
-    }
 }
 </style>
 </head>
 
 <body>
-
 <div class="container">
-
     <div class="header">
         <img src="File/Image/salud-sin-info.jpg" alt="Salud">
         <h1>Buscar incidencia</h1>
     </div>
 
     <div class="card">
-
         <form id="buscadorForm" method="GET" action="buscador.jsp">
             <div class="top-row">
                 <div class="input-wrap">
@@ -962,13 +635,13 @@ tbody tr:hover {
                             <label><input type="checkbox" id="modulabAll" onchange="toggleModulabAll()"> Todas</label>
 
                             <% for (Map<String,String> appRow : aplicacionesList) {
-                                String appName = appRow.get("aplicacion");
-                                boolean checked = false;
-                                if (modulabSelected != null) {
-                                    for (String s : modulabSelected) {
-                                        if (s.equals(appName)) { checked = true; break; }
-                                    }
-                                }
+                                   String appName = appRow.get("aplicacion");
+                                   boolean checked = false;
+                                   if (modulabSelected != null) {
+                                       for (String s : modulabSelected) {
+                                           if (s.equals(appName)) { checked = true; break; }
+                                       }
+                                   }
                             %>
                             <label>
                                 <input type="checkbox" name="modulab[]" value="<%= escapeHtml(appName) %>"
@@ -984,7 +657,6 @@ tbody tr:hover {
             </div>
 
             <input type="hidden" name="orden" id="ordenInput" value="<%=orden%>">
-            <input type="hidden" name="pageNum" id="pageNumInput" value="<%= pageNum %>">
         </form>
 
         <div class="small-note">
@@ -992,17 +664,14 @@ tbody tr:hover {
         </div>
 
         <% if (hasSearch && !rows.isEmpty()) { %>
-
         <div class="found-words">
-
             <div class="found-row">
                 <strong>Palabra o frase buscada</strong>
                 <div class="word-box-container">
                     <% for (Map.Entry<String,Integer> e : searchCounts.entrySet()) {
-                        if (e.getValue() > 0) { %>
-                    <div class="word-box search-word"
-                         data-key="<%= escapeHtml(displayLabel.get(e.getKey())) %>"
-                         data-visibility="true">
+                           if (e.getValue() > 0) { %>
+                    <div class="word-box"
+                         data-key="<%= escapeHtml(displayLabel.get(e.getKey())) %>">
                         <div class="word-circle"></div>
                         <span><%= escapeHtml(displayLabel.get(e.getKey())) %> (<%=e.getValue()%>)</span>
                     </div>
@@ -1014,22 +683,22 @@ tbody tr:hover {
                 <strong>Aplicación</strong>
                 <div class="word-box-container">
                     <% for (Map.Entry<String,Integer> e : appCounts.entrySet()) {
-                        if (e.getValue() > 0) {
-                            String appNorm = e.getKey();
-                            String appLabel = displayLabel.get(appNorm);
-                            List<String> words = appToWords.get(appLabel);
-                            StringBuilder sbWords = new StringBuilder();
-                            if (words != null) {
-                                for (String w : words) {
-                                    if (sbWords.length() > 0) sbWords.append("|");
-                                    sbWords.append(w.trim());
-                                }
-                            }
+                           if (e.getValue() > 0) {
+                               String appNorm = e.getKey();
+                               String appLabel = displayLabel.get(appNorm);
+                               List<String> words = appToWords.get(appLabel);
+
+                               StringBuilder sbWords = new StringBuilder();
+                               if (words != null) {
+                                   for (String w : words) {
+                                       if (sbWords.length() > 0) sbWords.append("|");
+                                       sbWords.append(w.trim());
+                                   }
+                               }
                     %>
-                    <div class="word-box app-box parent-word"
+                    <div class="word-box app-box"
                          data-key="<%= escapeHtml(appLabel) %>"
-                         data-words="<%= escapeHtml(sbWords.toString()) %>"
-                         data-visibility="true">
+                         data-words="<%= escapeHtml(sbWords.toString()) %>">
                         <div class="word-circle"></div>
                         <span><%= escapeHtml(appLabel) %> (<%=e.getValue()%>)</span>
                     </div>
@@ -1041,31 +710,18 @@ tbody tr:hover {
                 <strong>Palabras del rastro</strong>
                 <div class="word-box-container">
                     <% for (Map.Entry<String,Integer> e : rastroCounts.entrySet()) {
-                        if (e.getValue() > 0) {
-                            String rastroWord = displayLabel.get(e.getKey());
-                            String parentApp = "";
-                            for (Map.Entry<String, List<String>> appEntry : appToWords.entrySet()) {
-                                if (appEntry.getValue().contains(rastroWord)) {
-                                    parentApp = appEntry.getKey();
-                                    break;
-                                }
-                            }
-                    %>
-                    <div class="word-box rastro-word"
-                         data-key="<%= escapeHtml(rastroWord) %>"
-                         data-parent="<%= escapeHtml(parentApp) %>"
-                         data-visibility="true">
+                           if (e.getValue() > 0) { %>
+                    <div class="word-box"
+                         data-key="<%= escapeHtml(displayLabel.get(e.getKey())) %>">
                         <div class="word-circle"></div>
-                        <span><%= escapeHtml(rastroWord) %> (<%=e.getValue()%>)</span>
+                        <span><%= escapeHtml(displayLabel.get(e.getKey())) %> (<%=e.getValue()%>)</span>
                     </div>
                     <% }} %>
                 </div>
             </div>
 
             <button id="resetFiltersBtn" type="button">Quitar filtros de palabras</button>
-
         </div>
-
         <% } %>
 
         <div class="filter-visual">
@@ -1077,104 +733,74 @@ tbody tr:hover {
         <div class="table-wrap">
             <table>
                 <thead>
-                    <tr>
-                        <th class="col-fecha">
-                            <select id="ordenSelect" onchange="setOrden(this.value)">
-                                <option value="DESC" <%= "DESC".equals(orden) ? "selected" : "" %>>Más reciente</option>
-                                <option value="ASC" <%= "ASC".equals(orden) ? "selected" : "" %>>Más antiguo</option>
-                            </select>
-                        </th>
-                        <th>Asunto</th>
-                        <th>Solución</th>
-                        <th class="col-visual">Visual</th>
-                    </tr>
+                <tr>
+                    <th class="col-fecha">
+                        <select id="ordenSelect" onchange="setOrden(this.value)">
+                            <option value="DESC" <%= "DESC".equals(orden) ? "selected" : "" %>>Más reciente</option>
+                            <option value="ASC" <%= "ASC".equals(orden) ? "selected" : "" %>>Más antiguo</option>
+                        </select>
+                    </th>
+                    <th>Asunto</th>
+                    <th>Solución</th>
+                    <th class="col-visual">Visual</th>
+                </tr>
                 </thead>
 
                 <tbody id="incidenciasBody">
+                <% if (rows.isEmpty()) { %>
+                <tr>
+                    <td colspan="4" style="text-align:center; padding:20px; font-weight:bold; color:#c00;">
+                        No encontrado
+                    </td>
+                </tr>
+                <% } else {
 
-                    <% if (paginatedRows.isEmpty()) { %>
+                       List<String> highlightTermsList = new ArrayList<>();
+                       if (hasText) highlightTermsList.add(q);
+                       if (hasApps && modulabSelected != null) {
+                           for (String appName : modulabSelected) {
+                               List<String> ws = appToWords.get(appName);
+                               if (ws != null) highlightTermsList.addAll(ws);
+                           }
+                       }
 
-                    <tr>
-                        <td colspan="4" style="text-align:center; padding:20px; font-weight:bold; color:#c00;">
-                            No encontrado
-                        </td>
-                    </tr>
+                       for (Row r : rows) {
+                           String asuntoHtml = highlightTerms(r.asunto, highlightTermsList);
+                           String solucionHtml = highlightTerms(r.solucion, highlightTermsList);
+                           boolean esFavorito = (r.visual == 3);
+                %>
 
-                    <% } else {
+                <tr data-visual="<%=r.visual%>" class="<%= esFavorito ? "favorito" : "" %>">
+                    <td class="col-fecha"><%= r.fecha %></td>
+                    <td><%= asuntoHtml %></td>
+                    <td><%= solucionHtml %></td>
+                    <td class="col-visual">
+                        <div class="circle <%= r.visual == 1 ? "red" : "green" %>"
+                             onclick="toggleVisual('<%= escapeHtml(r.asunto) %>',
+                                                   '<%= escapeHtml(r.solucion) %>',
+                                                   '<%= r.fecha %>',
+                                                   this)">
+                        </div>
+                        <div class="star <%= esFavorito ? "fav-star" : "" %>"
+                             onclick="toggleFavorito('<%= escapeHtml(r.asunto) %>',
+                                                     '<%= escapeHtml(r.solucion) %>',
+                                                     '<%= r.fecha %>',
+                                                     this)">
+                            ⭐
+                        </div>
+                    </td>
+                </tr>
 
-                    List<String> highlightTermsList = new ArrayList<>();
-
-                    if (hasText) highlightTermsList.add(q);
-
-                    if (hasApps && modulabSelected != null) {
-                        for (String appName : modulabSelected) {
-                            List<String> ws = appToWords.get(appName);
-                            if (ws != null) highlightTermsList.addAll(ws);
-                        }
-                    }
-
-                    for (Row r : paginatedRows) {
-                        String asuntoHtml = highlightTerms(r.asunto, highlightTermsList);
-                        String solucionHtml = highlightTerms(r.solucion, highlightTermsList);
-                        boolean esFavorito = (r.visual == 3);
-                    %>
-
-                    <tr data-visual="<%=r.visual%>" class="<%= esFavorito ? "favorito" : "" %>">
-                        <td class="col-fecha"><%= r.fecha %></td>
-                        <td><%= asuntoHtml %></td>
-                        <td><%= solucionHtml %></td>
-                        <td class="col-visual">
-                            <div class="circle <%= r.visual == 1 ? "red" : "green" %>"
-                                 onclick="toggleVisual('<%= escapeHtml(r.asunto) %>',
-                                                       '<%= escapeHtml(r.solucion) %>',
-                                                       '<%= r.fecha %>',
-                                                       this)">
-                            </div>
-                            <div class="star <%= esFavorito ? "fav-star" : "" %>"
-                                 onclick="toggleFavorito('<%= escapeHtml(r.asunto) %>',
-                                                         '<%= escapeHtml(r.solucion) %>',
-                                                         '<%= r.fecha %>',
-                                                         this)">
-                                ⭐
-                            </div>
-                        </td>
-                    </tr>
-
-                    <% }} %>
-
+                <% }} %>
                 </tbody>
             </table>
         </div>
-
-        <% if (hasSearch && rows.size() > pageSize) { %>
-        <div class="pagination">
-            <button onclick="goToPage(<%= Math.max(1, pageNum - 1) %>)" <%= pageNum <= 1 ? "disabled" : "" %>>
-                ← Página Anterior
-            </button>
-            
-            <span class="pagination-info">
-                Página <strong><%= pageNum %></strong> de <strong><%= totalPages %></strong>
-                (<strong><%= rows.size() %></strong> total)
-            </span>
-            
-            <button onclick="goToPage(<%= Math.min(totalPages, pageNum + 1) %>)" <%= pageNum >= totalPages ? "disabled" : "" %>>
-                Página Siguiente →
-            </button>
-        </div>
-        <% } %>
-
     </div>
 </div>
 
 <script>
 function setOrden(ord) {
     document.getElementById("ordenInput").value = ord;
-    document.getElementById("pageNumInput").value = "1";
-    document.getElementById("buscadorForm").submit();
-}
-
-function goToPage(pageNum) {
-    document.getElementById("pageNumInput").value = pageNum;
     document.getElementById("buscadorForm").submit();
 }
 
@@ -1198,11 +824,14 @@ document.addEventListener("change", function (e) {
     }
 });
 
+// normalización universal en JS
 function norm(str) {
     if (!str) return "";
     return str
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
+        .replace(/ñ/g, "n")
+        .replace(/Ñ/g, "n")
         .toLowerCase()
         .replace(/[^a-z0-9 ]/g, " ")
         .replace(/\s+/g, " ")
@@ -1210,23 +839,27 @@ function norm(str) {
 }
 
 document.addEventListener("DOMContentLoaded", function () {
+
     const wordBoxes = document.querySelectorAll(".word-box");
     const rows = document.querySelectorAll("#incidenciasBody tr");
     const resetBtn = document.getElementById("resetFiltersBtn");
 
-    const activeFilters = new Set();
-    const wordVisibility = {};
+    let activeKey = null;
+    const disabledKeys = new Set();
 
-    wordBoxes.forEach(box => {
-        const key = box.dataset.key;
-        wordVisibility[key] = true;
-    });
-
-    function rowContainsAnyActive(row) {
-        if (activeFilters.size === 0) return true;
+    function rowContainsKey(row, key) {
+        if (!key) return true;
         const asunto = norm(row.children[1].innerText);
         const solucion = norm(row.children[2].innerText);
-        for (const k of activeFilters) {
+        const k = norm(key);
+        return asunto.includes(k) || solucion.includes(k);
+    }
+
+    function rowContainsAnyDisabled(row) {
+        if (disabledKeys.size === 0) return false;
+        const asunto = norm(row.children[1].innerText);
+        const solucion = norm(row.children[2].innerText);
+        for (const k of disabledKeys) {
             const kn = norm(k);
             if (!kn) continue;
             if (asunto.includes(kn) || solucion.includes(kn)) return true;
@@ -1234,102 +867,110 @@ document.addEventListener("DOMContentLoaded", function () {
         return false;
     }
 
-    function updateWordBoxUI(box) {
-        const key = box.dataset.key;
-        const circle = box.querySelector(".word-circle");
-        const isVisible = wordVisibility[key] !== false;
-        
-        if (isVisible) {
-            if (circle) circle.classList.remove("off");
-        } else {
-            if (circle) circle.classList.add("off");
-        }
-    }
-
-    function applyFilters() {
+    function applyWordFilter() {
         rows.forEach(row => {
-            const passFilter = rowContainsAnyActive(row);
-            
-            const asunto = norm(row.children[1].innerText);
-            const solucion = norm(row.children[2].innerText);
-            let allHidden = false;
-            
-            for (const key in wordVisibility) {
-                if (wordVisibility[key] === false) {
-                    const kn = norm(key);
-                    if (kn && (asunto.includes(kn) || solucion.includes(kn))) {
-                        allHidden = true;
-                        break;
-                    }
-                }
+            let filtered = false;
+
+            if (activeKey && !rowContainsKey(row, activeKey)) {
+                filtered = true;
             }
-            
-            row.style.display = (passFilter && !allHidden) ? "" : "none";
+
+            if (!filtered && rowContainsAnyDisabled(row)) {
+                filtered = true;
+            }
+
+            row.dataset.wordFiltered = filtered ? "1" : "0";
         });
+
+        applyCombinedFilters();
     }
 
     wordBoxes.forEach(box => {
         const key = box.dataset.key;
         const circle = box.querySelector(".word-circle");
-        const isParentWord = box.classList.contains("parent-word");
+        const isAppBox = box.classList.contains("app-box");
+        const wordsOfApp = isAppBox && box.dataset.words
+            ? box.dataset.words.split("|").map(w => w.trim()).filter(w => w.length > 0)
+            : [];
 
+        // CLIC EN LA PALABRA → FILTRO POSITIVO (NO PARA app-box)
         box.addEventListener("click", function (e) {
             if (e.target === circle) return;
+            if (isAppBox) return;          // la app NO filtra en positivo
+            if (disabledKeys.has(key)) return;
 
-            if (activeFilters.has(key)) {
-                activeFilters.delete(key);
+            if (activeKey === key) {
+                activeKey = null;
                 box.classList.remove("active-filter");
             } else {
-                activeFilters.add(key);
+                activeKey = key;
+                wordBoxes.forEach(b => b.classList.remove("active-filter"));
                 box.classList.add("active-filter");
             }
-            applyFilters();
+
+            applyWordFilter();
         });
 
-        if (circle) {
-            circle.addEventListener("click", function (e) {
-                e.stopPropagation();
+        // CLIC EN EL CÍRCULO → FILTRO NEGATIVO
+        circle.addEventListener("click", function (e) {
+            e.stopPropagation();
+            if (activeKey === key) return;
 
-                if (isParentWord) {
-                    const childWords = box.dataset.words.split("|");
-                    const newVis = !(wordVisibility[key] !== false);
-                    
-                    wordVisibility[key] = newVis;
-                    childWords.forEach(childWord => {
-                        wordVisibility[childWord.trim()] = newVis;
-                        wordBoxes.forEach(childBox => {
-                            if (childBox.dataset.key === childWord.trim()) {
-                                const c = childBox.querySelector(".word-circle");
-                                if (c) {
-                                    if (newVis) {
-                                        c.classList.remove("off");
-                                    } else {
-                                        c.classList.add("off");
-                                    }
-                                }
+            const turningOff = !circle.classList.contains("off");
+
+            if (turningOff) {
+                circle.classList.add("off");
+                disabledKeys.add(key);
+                box.classList.add("disabled");
+            } else {
+                circle.classList.remove("off");
+                disabledKeys.delete(key);
+                box.classList.remove("disabled");
+            }
+
+            // Si es una APP, aplicar lo mismo a sus palabras hijas
+            if (isAppBox && wordsOfApp.length > 0) {
+                wordsOfApp.forEach(w => {
+                    const childBoxes = Array.from(document.querySelectorAll(".word-box"))
+                        .filter(b => norm(b.dataset.key) === norm(w));
+
+                    childBoxes.forEach(cb => {
+                        const cCircle = cb.querySelector(".word-circle");
+                        const cKey = cb.dataset.key;
+
+                        if (turningOff) {
+                            if (!cCircle.classList.contains("off")) {
+                                cCircle.classList.add("off");
                             }
-                        });
+                            disabledKeys.add(cKey);
+                            cb.classList.add("disabled");
+                        } else {
+                            cCircle.classList.remove("off");
+                            disabledKeys.delete(cKey);
+                            cb.classList.remove("disabled");
+                        }
                     });
-                } else {
-                    wordVisibility[key] = !(wordVisibility[key] !== false);
-                }
+                });
+            }
 
-                updateWordBoxUI(box);
-                applyFilters();
-            });
-        }
+            applyWordFilter();
+        });
     });
 
     if (resetBtn) {
         resetBtn.addEventListener("click", () => {
-            activeFilters.clear();
+            activeKey = null;
+            disabledKeys.clear();
+
             wordBoxes.forEach(b => {
                 b.classList.remove("active-filter");
-                wordVisibility[b.dataset.key] = true;
+                b.classList.remove("disabled");
                 const c = b.querySelector(".word-circle");
                 if (c) c.classList.remove("off");
             });
-            rows.forEach(r => r.style.display = "");
+
+            rows.forEach(r => r.dataset.wordFiltered = "0");
+            applyCombinedFilters();
         });
     }
 
@@ -1343,41 +984,35 @@ document.addEventListener("DOMContentLoaded", function () {
 
         rows.forEach(r => {
             const v = r.getAttribute("data-visual");
-            let shouldShowByVisual = true;
+            let visible = true;
 
             if (showFavoritos) {
-                shouldShowByVisual = (v === "3");
+                visible = (v === "3");
             } else if (showOcultas) {
-                shouldShowByVisual = (v === "1");
+                visible = (v === "1");
             } else {
-                shouldShowByVisual = (v === "0" || v === "3");
+                visible = (v === "0" || v === "3");
             }
 
-            r.dataset.visualFiltered = shouldShowByVisual ? "0" : "1";
+            r.dataset.visualFiltered = visible ? "0" : "1";
         });
 
         applyCombinedFilters();
     }
 
     function applyCombinedFilters() {
+        const showFavoritos = btnFav.classList.contains("active");
+
         rows.forEach(r => {
+            const wf = r.dataset.wordFiltered === "1";
             const vf = r.dataset.visualFiltered === "1";
-            const wf = !rowContainsAnyActive(r);
-            
-            let wordHidden = false;
-            const asunto = norm(r.children[1].innerText);
-            const solucion = norm(r.children[2].innerText);
-            for (const key in wordVisibility) {
-                if (wordVisibility[key] === false) {
-                    const kn = norm(key);
-                    if (kn && (asunto.includes(kn) || solucion.includes(kn))) {
-                        wordHidden = true;
-                        break;
-                    }
-                }
+            const v = r.getAttribute("data-visual");
+
+            if (showFavoritos && v === "3" && !wf) {
+                r.style.display = "";
+            } else {
+                r.style.display = (!wf && !vf) ? "" : "none";
             }
-            
-            r.style.display = (!vf && !wf && !wordHidden) ? "" : "none";
         });
     }
 
@@ -1421,6 +1056,7 @@ function toggleVisual(asunto, solucion, fecha, el) {
         .then(r => r.text())
         .then(t => {
             if (t.trim() === "OK") {
+
                 el.classList.toggle("green");
                 el.classList.toggle("red");
 
@@ -1444,18 +1080,22 @@ function toggleVisual(asunto, solucion, fecha, el) {
                 rows.forEach(r => {
                     const v = r.getAttribute("data-visual");
                     let visible = true;
+
                     if (showFavoritos) visible = (v === "3");
                     else if (showOcultas) visible = (v === "1");
                     else visible = (v === "0" || v === "3");
+
                     r.dataset.visualFiltered = visible ? "0" : "1";
                     if (!r.dataset.wordFiltered) r.dataset.wordFiltered = "0";
                 });
 
                 const showFav = btnFav.classList.contains("active");
+
                 rows.forEach(r => {
                     const wf = r.dataset.wordFiltered === "1";
                     const vf = r.dataset.visualFiltered === "1";
                     const v = r.getAttribute("data-visual");
+
                     if (showFav && v === "3" && !wf) {
                         r.style.display = "";
                     } else {
@@ -1477,18 +1117,20 @@ function toggleFavorito(asunto, solucion, fecha, el) {
         .then(r => r.text())
         .then(t => {
             if (t.trim() === "OK") {
-                el.classList.toggle("fav-star");
 
+                el.classList.toggle("fav-star");
                 const tr = el.closest("tr");
                 const circle = tr.querySelector(".circle");
 
                 if (newVal === 3) {
                     tr.classList.add("favorito");
                     tr.setAttribute("data-visual", "3");
+
                     if (circle && !circle.classList.contains("green")) {
                         circle.classList.remove("red");
                         circle.classList.add("green");
                     }
+
                 } else {
                     tr.classList.remove("favorito");
                     tr.setAttribute("data-visual", "0");
@@ -1503,18 +1145,22 @@ function toggleFavorito(asunto, solucion, fecha, el) {
                 rows.forEach(r => {
                     const v = r.getAttribute("data-visual");
                     let visible = true;
+
                     if (showFavoritos) visible = (v === "3");
                     else if (showOcultas) visible = (v === "1");
                     else visible = (v === "0" || v === "3");
+
                     r.dataset.visualFiltered = visible ? "0" : "1";
                     if (!r.dataset.wordFiltered) r.dataset.wordFiltered = "0";
                 });
 
                 const showFav = btnFav.classList.contains("active");
+
                 rows.forEach(r => {
                     const wf = r.dataset.wordFiltered === "1";
                     const vf = r.dataset.visualFiltered === "1";
                     const v = r.getAttribute("data-visual");
+
                     if (showFav && v === "3" && !wf) {
                         r.style.display = "";
                     } else {
@@ -1528,3 +1174,4 @@ function toggleFavorito(asunto, solucion, fecha, el) {
 
 </body>
 </html>
+
