@@ -29,21 +29,19 @@ private String normalize(String s) {
             .trim();
 }
 
-// puntuación para elegir la mejor variante de codificación
 private int scoreEncoding(String s) {
     if (s == null) return Integer.MIN_VALUE;
     int score = 0;
     for (int i = 0; i < s.length(); i++) {
         char c = s.charAt(i);
-        if (c == '\uFFFD') score -= 5;          // �
-        else if (c == 'Ã') score -= 2;          // típico mojibake
-        else if (c >= 32 && c <= 126) score++;  // ASCII visible
-        else if (c >= 160) score += 2;          // letras acentuadas, ñ, etc.
+        if (c == '\uFFFD') score -= 5;
+        else if (c == 'Ã') score -= 2;
+        else if (c >= 32 && c <= 126) score++;
+        else if (c >= 160) score += 2;
     }
     return score;
 }
 
-// intento robusto de arreglar mojibake tipo "D�AS", "Ã‰", etc.
 private String fixEncoding(String s) {
     if (s == null) return null;
 
@@ -154,6 +152,18 @@ String[] modulabSelected = request.getParameterValues("modulab[]");
 boolean hasText = (q != null && !q.trim().isEmpty());
 boolean hasApps = (modulabSelected != null && modulabSelected.length > 0);
 boolean hasSearch = hasText || hasApps;
+
+// Obtener página actual
+int currentPage = 1;
+String pageParam = request.getParameter("page");
+if (pageParam != null) {
+    try {
+        currentPage = Integer.parseInt(pageParam);
+        if (currentPage < 1) currentPage = 1;
+    } catch (NumberFormatException ignored) {}
+}
+
+final int ITEMS_PER_PAGE = 250;
 
 List<Map<String,String>> aplicacionesList = new ArrayList<>();
 Map<String,List<String>> appToWords = new LinkedHashMap<>();
@@ -314,7 +324,6 @@ try {
         r.solucion = fixEncoding(rs.getString("solucion"));
         r.visual = rs.getInt("visual");
 
-        // YA NO DESCARTAMOS FILAS AQUÍ: solo contamos coincidencias
         if (hasText) {
             boolean matchText;
             if (q.contains(" ")) {
@@ -381,6 +390,24 @@ rows.sort((a, b) -> {
 
 int ocultasCount = 0;
 for (Row r : rows) if (r.visual == 1) ocultasCount++;
+
+// Paginación
+int totalPages = 1;
+int startIdx = 0;
+int endIdx = rows.size();
+
+if (hasSearch && rows.size() > ITEMS_PER_PAGE) {
+    totalPages = (int) Math.ceil((double) rows.size() / ITEMS_PER_PAGE);
+    startIdx = (currentPage - 1) * ITEMS_PER_PAGE;
+    endIdx = Math.min(startIdx + ITEMS_PER_PAGE, rows.size());
+    if (startIdx >= rows.size()) {
+        currentPage = totalPages;
+        startIdx = (currentPage - 1) * ITEMS_PER_PAGE;
+        endIdx = rows.size();
+    }
+}
+
+List<Row> pageRows = rows.subList(startIdx, endIdx);
 %>
 
 <!DOCTYPE html>
@@ -609,6 +636,37 @@ tr.favorito {
 tr.favorito .highlight {
     background: #ff9800 !important;
 }
+.pagination-container {
+    margin-top: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+}
+.pagination-btn {
+    padding: 8px 14px;
+    border: 1px solid #b8c4d1;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #0057A8;
+    font-weight: bold;
+    cursor: pointer;
+    transition: 0.2s;
+}
+.pagination-btn:hover:not(:disabled) {
+    background: #0057A8;
+    color: white;
+}
+.pagination-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.pagination-info {
+    font-weight: bold;
+    color: #0057A8;
+    min-width: 120px;
+    text-align: center;
+}
 </style>
 </head>
 
@@ -657,6 +715,7 @@ tr.favorito .highlight {
             </div>
 
             <input type="hidden" name="orden" id="ordenInput" value="<%=orden%>">
+            <input type="hidden" name="page" id="pageInput" value="1">
         </form>
 
         <div class="small-note">
@@ -764,7 +823,7 @@ tr.favorito .highlight {
                            }
                        }
 
-                       for (Row r : rows) {
+                       for (Row r : pageRows) {
                            String asuntoHtml = highlightTerms(r.asunto, highlightTermsList);
                            String solucionHtml = highlightTerms(r.solucion, highlightTermsList);
                            boolean esFavorito = (r.visual == 3);
@@ -795,12 +854,35 @@ tr.favorito .highlight {
                 </tbody>
             </table>
         </div>
+
+        <!-- PAGINACIÓN -->
+        <% if (hasSearch && rows.size() > ITEMS_PER_PAGE) { %>
+        <div class="pagination-container">
+            <button class="pagination-btn" onclick="goToPage(<%= currentPage - 1 %>)" 
+                    <%= currentPage == 1 ? "disabled" : "" %>>
+                ← Anterior
+            </button>
+            <div class="pagination-info">
+                Página <%= currentPage %> de <%= totalPages %>
+            </div>
+            <button class="pagination-btn" onclick="goToPage(<%= currentPage + 1 %>)" 
+                    <%= currentPage >= totalPages ? "disabled" : "" %>>
+                Siguiente →
+            </button>
+        </div>
+        <% } %>
     </div>
 </div>
 
 <script>
 function setOrden(ord) {
+    document.getElementById("pageInput").value = "1";
     document.getElementById("ordenInput").value = ord;
+    document.getElementById("buscadorForm").submit();
+}
+
+function goToPage(page) {
+    document.getElementById("pageInput").value = page;
     document.getElementById("buscadorForm").submit();
 }
 
@@ -824,7 +906,6 @@ document.addEventListener("change", function (e) {
     }
 });
 
-// normalización universal en JS
 function norm(str) {
     if (!str) return "";
     return str
@@ -893,10 +974,9 @@ document.addEventListener("DOMContentLoaded", function () {
             ? box.dataset.words.split("|").map(w => w.trim()).filter(w => w.length > 0)
             : [];
 
-        // CLIC EN LA PALABRA → FILTRO POSITIVO (NO PARA app-box)
         box.addEventListener("click", function (e) {
             if (e.target === circle) return;
-            if (isAppBox) return;          // la app NO filtra en positivo
+            if (isAppBox) return;
             if (disabledKeys.has(key)) return;
 
             if (activeKey === key) {
@@ -911,7 +991,6 @@ document.addEventListener("DOMContentLoaded", function () {
             applyWordFilter();
         });
 
-        // CLIC EN EL CÍRCULO → FILTRO NEGATIVO
         circle.addEventListener("click", function (e) {
             e.stopPropagation();
             if (activeKey === key) return;
@@ -928,7 +1007,6 @@ document.addEventListener("DOMContentLoaded", function () {
                 box.classList.remove("disabled");
             }
 
-            // Si es una APP, aplicar lo mismo a sus palabras hijas
             if (isAppBox && wordsOfApp.length > 0) {
                 wordsOfApp.forEach(w => {
                     const childBoxes = Array.from(document.querySelectorAll(".word-box"))
@@ -1103,7 +1181,8 @@ function toggleVisual(asunto, solucion, fecha, el) {
                     }
                 });
             }
-        });
+        })
+        .catch(err => console.error("Error:", err));
 }
 
 function toggleFavorito(asunto, solucion, fecha, el) {
@@ -1168,7 +1247,8 @@ function toggleFavorito(asunto, solucion, fecha, el) {
                     }
                 });
             }
-        });
+        })
+        .catch(err => console.error("Error:", err));
 }
 </script>
 
